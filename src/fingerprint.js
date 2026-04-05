@@ -1,12 +1,5 @@
 /**
  * RankShield Fingerprint Engine — Client-Side Behavioral Analysis
- * Copyright 2026 SEO Elite Agency LLC. All rights reserved.
- *
- * PATENT PENDING — The hardware behavioral fingerprinting methods implemented
- * in this script are covered by the following provisional patent applications
- * filed April 5, 2026 by Jamie Kloncz / SEO Elite Agency:
- *   RS-001-PROV — Cross-Channel Persistent Attacker Identity via Hardware Behavioral Fingerprinting
- *   RS-002-PROV — Behavioral Fingerprint Persistence Across IP Rotation and VPN Masking
  *
  * This script is injected into the <head> of every page on the EmDash site.
  * It runs silently in the background, collecting behavioral signals that
