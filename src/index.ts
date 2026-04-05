@@ -98,6 +98,11 @@ export function rankShield(options: RankShieldOptions): PluginDescriptor {
         label: "Security Settings",
         icon: "settings",
       },
+      {
+        path: "/rankshield/injection",
+        label: "AI Injection Defense",
+        icon: "cpu",
+      },
     ],
 
     adminWidgets: [
