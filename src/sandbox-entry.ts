@@ -7,6 +7,7 @@
  *
  * Architecture:
  *  - request:receive  → evaluate incoming requests before content loads
+ *  - content:beforeSave → scan content for prompt injection payloads (RS-016)
  *  - content:afterSave → scan content for SEO attack patterns
  *  - plugin:install   → onboarding + initial sync
  *  - plugin:uninstall → cleanup
@@ -18,6 +19,7 @@
  */
 
 import { definePlugin } from "emdash";
+import { scanContent } from "./promptInjectionScanner";
 import type { PluginContext } from "emdash";
 
 // ── CONSTANTS ──────────────────────────────────────────────────────────────────
@@ -417,6 +419,51 @@ function buildSettingsPage(currentSettings: Record<string, unknown>) {
   };
 }
 
+// ── PROMPT INJECTION PAGE BUILDER ────────────────────────────────────────────────
+
+function buildInjectionPage(injectionEvents: any[]) {
+  const confirmed = injectionEvents.filter((e: any) => e.verdict === "CONFIRMED_INJECTION").length;
+  const suspected = injectionEvents.filter((e: any) => e.verdict === "SUSPECTED_INJECTION").length;
+  const blocked   = injectionEvents.filter((e: any) => e.action === "block").length;
+
+  if (!injectionEvents.length) {
+    return {
+      blocks: [
+        { type: "header", text: "AI Injection Defense — Content Scanner" },
+        { type: "section", text: "No injection attempts detected yet. RankShield scans every piece of content BEFORE publication, checking for hidden instructions that could manipulate AI agents, Google AI Overviews, and RAG systems." },
+        { type: "section", text: "💡 **What it protects against:** Hidden prompt injection payloads in comments, reviews, and user-generated content. OWASP ranks this the #1 LLM security risk in 2025. Patent Pending RS-016-PROV." },
+      ],
+    };
+  }
+
+  return {
+    blocks: [
+      { type: "header", text: `AI Injection Defense — ${injectionEvents.length} Scans` },
+      { type: "section", text: `**${confirmed}** confirmed injections · **${suspected}** suspected · **${blocked}** blocked before publication` },
+      {
+        type: "table",
+        blockId: "injection-events",
+        columns: [
+          { key: "content_id", label: "Content ID",  format: "text"          },
+          { key: "score",      label: "Risk Score",  format: "badge"         },
+          { key: "verdict",    label: "Verdict",     format: "badge"         },
+          { key: "findings",   label: "Signals",     format: "number"        },
+          { key: "action",     label: "Action",      format: "badge"         },
+          { key: "ts",         label: "Detected",    format: "relative_time" },
+        ],
+        rows: injectionEvents.slice(0, 50).map((e: any) => ({
+          content_id: e.content_id || "unknown",
+          score:      `${e.score}/100`,
+          verdict:    e.verdict,
+          findings:   e.findings,
+          action:     (e.action || "allow").toUpperCase(),
+          ts:         e.ts,
+        })),
+      },
+    ],
+  };
+}
+
 // ── MAIN PLUGIN DEFINITION ─────────────────────────────────────────────────────
 
 export default definePlugin({
@@ -495,6 +542,79 @@ export default definePlugin({
             return { block: true, status: 403, body: "Access denied by RankShield security." };
           } else {
             ctx.log.info(`[RankShield] Suspicious request logged from ${ip} — ${result.reason} (score: ${result.threat_score})`);
+          }
+        }
+      },
+    },
+
+    /**
+     * PROMPT INJECTION SCAN (RS-016-PROV)
+     * Fires BEFORE content is saved — pre-publication defense.
+     * Scans for hidden AI prompt injection payloads targeting LLMs,
+     * AI Overview crawlers, and RAG systems that process this content.
+     * OWASP LLM Top 10 2025 #1 Risk: Indirect Prompt Injection
+     */
+    "content:beforeSave": {
+      handler: async (event: any, ctx: PluginContext) => {
+        const opts = getOptions(ctx);
+
+        const title   = (event.content?.title ?? "") as string;
+        const body    = JSON.stringify(event.content?.body ?? "");
+        const role    = (event.author?.role ?? "contributor") as any;
+        const cType   = (event.content?.type ?? "post") as string;
+
+        const result = scanContent(title, body, {
+          mode:             opts.mode,
+          authorRole:       role,
+          contentType:      cType,
+          aiAccessEnabled:  true,
+        });
+
+        // Always log to KV for dashboard visibility
+        await ctx.kv.set(`injection:${event.content?.id ?? Date.now()}`, {
+          score:    result.score,
+          verdict:  result.verdict,
+          findings: result.findings.length,
+          action:   result.action,
+          ts:       new Date().toISOString(),
+        });
+
+        if (!result.clean) {
+          ctx.log.warn(`[RankShield] Prompt injection detected in "${title}" — score: ${result.score}/100, verdict: ${result.verdict}, action: ${result.action}`);
+
+          // Block or quarantine based on mode and confidence
+          if (result.action === "block") {
+            return {
+              block: true,
+              reason: `RankShield blocked content containing prompt injection payload (score: ${result.score}/100). ${result.summary}`,
+            };
+          }
+
+          if (result.action === "quarantine") {
+            // Allow save but flag for admin review
+            event.content.status = "pending_review";
+            event.content.rankshield_flag = {
+              type:    "prompt_injection",
+              score:   result.score,
+              verdict: result.verdict,
+              summary: result.summary,
+            };
+          }
+
+          // Alert webhook if configured
+          if (opts.alertWebhook && result.score >= 50) {
+            ctx.fetch(opts.alertWebhook, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                alert:   "PROMPT_INJECTION_DETECTED",
+                title,
+                score:   result.score,
+                verdict: result.verdict,
+                action:  result.action,
+                summary: result.summary,
+              }),
+            }).catch(() => {});
           }
         }
       },
@@ -710,6 +830,21 @@ export default definePlugin({
           if (page === "/rankshield/settings") {
             const settings = await ctx.kv.get<Record<string, unknown>>("settings") ?? {};
             return buildSettingsPage(settings);
+          }
+
+          if (page === "/rankshield/injection") {
+            // Fetch injection scan events from KV
+            const keys = await ctx.kv.list("injection:");
+            const events: any[] = [];
+            for (const key of (keys || []).slice(0, 100)) {
+              const event = await ctx.kv.get<any>(key);
+              if (event) {
+                events.push({ content_id: key.replace("injection:", ""), ...event });
+              }
+            }
+            // Sort by most recent first
+            events.sort((a: any, b: any) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+            return buildInjectionPage(events);
           }
         }
 
