@@ -354,4 +354,208 @@ export default definePlugin({
 
         // Check KV cache first
         const cacheKey = `ip:${ip}`;
-        const cached   = await ctx
+        const cached   = await ctx.kv.get<{ decision: string; score: number; ts: number }>(cacheKey);
+        if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+          if (cached.decision === "block") {
+            ctx.log.info(`[RankShield] Blocking cached threat IP ${ip}`);
+            return { block: true, status: 403, body: "Access denied by RankShield security." };
+          }
+          return;
+        }
+
+        const result = await checkRequest(ctx, opts, ip, userAgent, url);
+
+        await ctx.kv.set(cacheKey, {
+          decision: result.blocked ? "block" : "allow",
+          score:    result.threat_score,
+          ts:       Date.now(),
+        });
+
+        if (result.threat_score > 30) {
+          const blocked = result.blocked && result.threat_score >= opts.blockThreshold;
+          await recordEvent(ctx, {
+            id:          makeId(),
+            timestamp:   new Date().toISOString(),
+            ip,
+            fingerprint: result.fingerprint,
+            reason:      result.reason,
+            threatScore: result.threat_score,
+            blocked,
+            url,
+            userAgent,
+          });
+          if (blocked) {
+            ctx.log.warn(`[RankShield] Blocked ${ip} — ${result.reason} (score: ${result.threat_score})`);
+            return { block: true, status: 403, body: "Access denied by RankShield security." };
+          }
+        }
+      },
+    },
+
+    "content:afterSave": {
+      handler: async (event: any, ctx: PluginContext) => {
+        if (event.content?.status !== "published") return;
+        const title   = (event.content?.title ?? "") as string;
+        const content = JSON.stringify(event.content?.body ?? "");
+        if (title.length < 10 || content.length < 50) {
+          ctx.log.warn(`[RankShield] Thin content detected — possible CTR manipulation target: "${title}"`);
+          await ctx.kv.set(`navboost:${event.content.id}`, {
+            flagged:   true,
+            reason:    "thin-content",
+            timestamp: new Date().toISOString(),
+          });
+        }
+      },
+    },
+
+    "plugin:install": {
+      handler: async (_event: any, ctx: PluginContext) => {
+        const opts  = getOptions(ctx);
+        ctx.log.info("[RankShield] Installing…");
+        const stats = await fetchStats(ctx, opts);
+        if (!stats) {
+          ctx.log.warn("[RankShield] Could not validate API key — check your RankShield dashboard.");
+        } else {
+          ctx.log.info(`[RankShield] Connected. ${stats.stats?.total_blocked_all_time ?? 0} total threats blocked across network.`);
+        }
+        await ctx.kv.set("settings", {
+          mode:           opts.mode,
+          blockThreshold: opts.blockThreshold,
+          showBadge:      opts.showBadge,
+          alertWebhook:   opts.alertWebhook,
+          installedAt:    new Date().toISOString(),
+          version:        "1.0.0",
+        });
+        ctx.log.info("[RankShield] Installation complete.");
+      },
+    },
+
+    "plugin:uninstall": {
+      handler: async (_event: any, ctx: PluginContext) => {
+        await ctx.kv.delete("settings");
+        await ctx.kv.delete("stats:cache");
+        ctx.log.info("[RankShield] Uninstalled and cleaned up.");
+      },
+    },
+  },
+
+  routes: {
+
+    fingerprint: {
+      public: true,
+      handler: async (routeCtx: any, ctx: PluginContext) => {
+        const opts = getOptions(ctx);
+        if (!ctx.http) return { blocked: false, score: 0 };
+
+        const body = routeCtx.input as Record<string, unknown>;
+        const ip   = routeCtx.request?.headers?.get("cf-connecting-ip")
+                  ?? routeCtx.request?.headers?.get("x-forwarded-for")?.split(",")[0]?.trim()
+                  ?? "unknown";
+
+        try {
+          const res = await ctx.http.fetch(`${RANKSHIELD_API}/api/plugin/fingerprint`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key":    opts.apiKey,
+              "x-plugin":     "emdash/1.0.0",
+            },
+            body: JSON.stringify({ ...body, ip }),
+          });
+          if (!res.ok) return { blocked: false, score: 0 };
+          const result = await res.json() as { blocked: boolean; threat_score: number; reason: string; fingerprint: string };
+
+          if (result.threat_score >= opts.blockThreshold) {
+            await recordEvent(ctx, {
+              id:          makeId(),
+              timestamp:   new Date().toISOString(),
+              ip,
+              fingerprint: result.fingerprint,
+              reason:      result.reason ?? "BEHAVIORAL_FINGERPRINT",
+              threatScore: result.threat_score,
+              blocked:     result.blocked,
+              url:         (body.url as string) ?? "/",
+              userAgent:   (body.ua  as string) ?? "",
+            });
+          }
+
+          return {
+            blocked: result.blocked && opts.mode !== "monitor",
+            score:   result.threat_score,
+            reason:  result.reason,
+          };
+        } catch {
+          return { blocked: false, score: 0 };
+        }
+      },
+    },
+
+    stats: {
+      handler: async (_routeCtx: any, ctx: PluginContext) => {
+        const opts   = getOptions(ctx);
+        const cached = await ctx.kv.get<{ data: StatsResponse; ts: number }>("stats:cache");
+        if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+          return { ...cached.data, cached: true };
+        }
+        const stats = await fetchStats(ctx, opts);
+        if (stats) {
+          await ctx.kv.set("stats:cache", { data: stats, ts: Date.now() });
+          return { ...stats, cached: false };
+        }
+        return { error: "Could not fetch stats", cached: false };
+      },
+    },
+
+    admin: {
+      handler: async (routeCtx: any, ctx: PluginContext) => {
+        const opts        = getOptions(ctx);
+        const interaction = routeCtx.input as {
+          type:       string;
+          page?:      string;
+          widget_id?: string;
+          action_id?: string;
+          values?:    Record<string, unknown>;
+        };
+
+        const stats = await fetchStats(ctx, opts).catch(() => null);
+
+        if (interaction.type === "page_load") {
+          if (interaction.page === "/rankshield")          return buildMainPage(stats, opts.mode);
+          if (interaction.page === "/rankshield/threats")  return buildThreatsPage(stats?.active_fingerprints ?? []);
+          if (interaction.page === "/rankshield/settings") {
+            const settings = await ctx.kv.get<Record<string, unknown>>("settings") ?? {};
+            return buildSettingsPage(settings);
+          }
+        }
+
+        if (interaction.type === "widget_load") {
+          if (interaction.widget_id === "rankshield-status") return buildStatusWidget(stats, opts.mode);
+          if (interaction.widget_id === "rankshield-trend")  return buildTrendWidget(stats);
+        }
+
+        if (interaction.type === "form_submit" && interaction.action_id === "save_settings") {
+          const values  = interaction.values ?? {};
+          const current = await ctx.kv.get<Record<string, unknown>>("settings") ?? {};
+          await ctx.kv.set("settings", {
+            ...current,
+            mode:           values.mode           ?? current.mode,
+            blockThreshold: values.blockThreshold  ?? current.blockThreshold,
+            showBadge:      values.showBadge        ?? current.showBadge,
+            alertWebhook:   values.alertWebhook     ?? current.alertWebhook,
+            updatedAt:      new Date().toISOString(),
+          });
+          return {
+            blocks: [{ type: "banner", style: "success", text: "✓ Settings saved. Changes take effect immediately." }],
+            toast:  { message: "RankShield settings saved", type: "success" },
+          };
+        }
+
+        if (interaction.type === "action" && interaction.action_id === "nav_threats") {
+          return buildThreatsPage(stats?.active_fingerprints ?? []);
+        }
+
+        return { blocks: [] };
+      },
+    },
+  },
+});
