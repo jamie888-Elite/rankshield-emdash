@@ -1,5 +1,14 @@
 /**
  * RankShield Plugin API Routes
+ * Copyright 2026 SEO Elite Agency LLC. All rights reserved.
+ *
+ * PATENT PENDING — The methods and systems implemented in this software
+ * are covered by the following provisional patent applications filed
+ * April 5, 2026 by Jamie Kloncz / SEO Elite Agency:
+ *   RS-001-PROV — Cross-Channel Persistent Attacker Identity via Hardware Behavioral Fingerprinting
+ *   RS-002-PROV — Behavioral Fingerprint Persistence Across IP Rotation and VPN Masking
+ *   RS-007-PROV — Sandboxed CMS Plugin Architecture for Real-Time Black Hat Defense
+ *
  * Handles requests from the EmDash plugin:
  *   POST /api/plugin/check       — server-side IP/UA check before page load
  *   POST /api/plugin/fingerprint — client-side hardware fingerprint analysis
