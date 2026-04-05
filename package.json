@@ -1,0 +1,39 @@
+{
+  "name": "@rankshield/emdash-security",
+  "version": "1.0.0",
+  "description": "RankShield — AI-powered behavioral threat defense for EmDash. The first and only security plugin built on hardware fingerprinting, not IP blocking.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./sandbox": "./src/sandbox-entry.ts"
+  },
+  "keywords": [
+    "emdash",
+    "emdash-plugin",
+    "security",
+    "bot-detection",
+    "ctr-manipulation",
+    "black-hat-seo",
+    "behavioral-fingerprinting",
+    "rankshield"
+  ],
+  "author": "SEO Elite Agency <hello@seoeliteagency.com>",
+  "license": "MIT",
+  "homepage": "https://rankshield.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/seo-elite-agency/rankshield-emdash"
+  },
+  "peerDependencies": {
+    "emdash": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "emdash": "^0.1.0"
+  },
+  "emdash": {
+    "plugin": true,
+    "capabilities": ["network:fetch"],
+    "allowedHosts": ["sea-shield-production.up.railway.app"]
+  }
+}
