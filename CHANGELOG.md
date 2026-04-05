@@ -40,7 +40,7 @@ All notable changes to RankShield for EmDash will be documented here.
 
 #### Patent Notice
 Methods described in this release are covered by provisional patent applications
-RS-001-PROV, RS-002-PROV, and RS-007-PROV filed April 5, 2026.
+RS-001-PROV, RS-002-PROV, and RS-007-PROV filed April 5, 2026 by Jamie Kloncz / SEO Elite Agency.
 
 ---
 
